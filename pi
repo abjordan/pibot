@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# Launch the pi coding agent against the current directory, sandboxed.
+#
+#   pi                       interactive session in $PWD
+#   pi "refactor the parser" interactive with an opening prompt
+#   pi -c                    continue the most recent session for this directory
+#   pi -p "summarize this"   one-shot, non-interactive
+#
+# Any flag pi understands is forwarded verbatim.
+set -euo pipefail
+
+HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+if [ ! -f "${HERE}/.env" ]; then
+    echo "error: ${HERE}/.env not found. Run: cp ${HERE}/.env.example ${HERE}/.env" >&2
+    exit 1
+fi
+
+# Mount whatever directory you invoked this from, at the same path inside the
+# container. pi keys sessions by working directory, so the path must be unique
+# per project — a fixed /work would merge every project's session history.
+export PI_WORKDIR="${PWD}"
+export PI_MOUNT="${PWD}"
+
+# So files the agent creates come out owned by you rather than by root.
+export USER_UID="$(id -u)"
+export USER_GID="$(id -g)"
+
+# --- extra skills directories -------------------------------------------------
+# PI_SKILLS_DIR (singular) is a single dir handled by compose. PI_SKILLS_DIRS
+# (plural) is a colon-separated list, and compose cannot expand a variable into
+# a variable *number* of mounts -- so those are added here as `run -v` flags.
+#
+# They mount under /opt/pi-skills.d/, a plain image directory. They cannot nest
+# inside /opt/pi-skills, because that is itself a read-only bind mount and you
+# cannot create mountpoints inside one.
+#
+# Read from .env by hand rather than sourcing it: .env holds unquoted values
+# containing spaces (PI_EXTENSIONS), and sourcing would try to execute them.
+skills_dirs="${PI_SKILLS_DIRS:-}"
+if [ -z "${skills_dirs}" ]; then
+    skills_dirs="$(sed -n 's/^[[:space:]]*PI_SKILLS_DIRS=//p' "${HERE}/.env" | tail -1)"
+    skills_dirs="${skills_dirs%\"}"; skills_dirs="${skills_dirs#\"}"
+fi
+
+mount_args=()
+if [ -n "${skills_dirs}" ]; then
+    idx=0
+    while IFS= read -r dir; do
+        [ -n "${dir}" ] || continue
+        dir="${dir%/}"
+        # compose does not expand ~, and neither does a quoted variable here.
+        case "${dir}" in "~/"*) dir="${HOME}/${dir#\~/}" ;; "~") dir="${HOME}" ;; esac
+        if [ ! -d "${dir}" ]; then
+            echo "warning: PI_SKILLS_DIRS entry is not a directory, skipping: ${dir}" >&2
+            continue
+        fi
+        abs="$(cd -- "${dir}" && pwd)"
+        idx=$((idx + 1))
+        # Numbered prefix so mount order is deterministic and two directories
+        # with the same basename don't collide. pi resolves duplicate *skill
+        # names* by keeping the first found, so a stable order matters.
+        target="$(printf '/opt/pi-skills.d/%02d-%s' "${idx}" "$(basename "${abs}")")"
+        mount_args+=(--volume "${abs}:${target}:ro")
+    done < <(printf '%s\n' "${skills_dirs}" | tr ':' '\n')
+fi
+
+# ${arr[@]+"${arr[@]}"} so an empty array doesn't trip `set -u` on older bash
+# (macOS ships bash 3.2).
+exec docker compose \
+    --file "${HERE}/docker-compose.yml" \
+    --env-file "${HERE}/.env" \
+    run --rm ${mount_args[@]+"${mount_args[@]}"} agent "$@"

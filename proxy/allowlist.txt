@@ -1,0 +1,24 @@
+# Baseline egress allowlist. One destination per line.
+# A leading dot matches the domain and every subdomain: `.npmjs.org` covers
+# registry.npmjs.org. No dot means an exact hostname match.
+#
+# Prefer adding your own entries to allowlist.local.txt so this file stays
+# a clean, reviewable baseline.
+
+# npm / yarn
+.npmjs.org
+.npmjs.com
+.yarnpkg.com
+
+# Python
+.pypi.org
+.pythonhosted.org
+
+# Git over HTTPS + release tarballs
+.github.com
+.githubusercontent.com
+
+# Deliberately NOT here: .debian.org. The agent runs unprivileged with all
+# capabilities dropped, so apt-get cannot work at runtime, and image builds
+# don't go through this proxy. To add system packages, set PI_APT_PACKAGES
+# in .env and rebuild.

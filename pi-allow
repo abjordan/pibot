@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# Manage the egress allowlist without restarting a running agent.
+#
+#   ./pi-allow                    show the effective allowlist
+#   ./pi-allow .crates.io         add an entry and apply it live
+#   ./pi-allow --reload           apply hand-edited changes
+#   ./pi-allow --tail             watch what the agent is trying to reach
+#
+# The last one is the useful one: run it in a second terminal, and every
+# TCP_DENIED line tells you exactly which domain to add.
+set -euo pipefail
+
+HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+LOCAL_LIST="${HERE}/proxy/allowlist.local.txt"
+
+if [ ! -f "${HERE}/.env" ]; then
+    echo "error: ${HERE}/.env not found. Run: cp ${HERE}/.env.example ${HERE}/.env" >&2
+    exit 1
+fi
+
+compose() {
+    docker compose --file "${HERE}/docker-compose.yml" --env-file "${HERE}/.env" "$@"
+}
+
+reload() {
+    # SIGHUP makes squid re-read its config and ACL files in place. The
+    # allowlists are live bind mounts, so a host-side edit is picked up
+    # immediately and existing client connections survive.
+    #
+    # `squid -k reconfigure` would be the obvious command, but it locates the
+    # running process through a pid file, and we run with `pid_filename none`.
+    compose kill -s HUP proxy
+    echo "allowlist reloaded"
+}
+
+case "${1:-}" in
+    "")
+        echo "--- baseline (proxy/allowlist.txt) ---"
+        grep -vE '^\s*(#|$)' "${HERE}/proxy/allowlist.txt" || true
+        echo "--- local (proxy/allowlist.local.txt) ---"
+        grep -vE '^\s*(#|$)' "${LOCAL_LIST}" | grep -v '^\.invalid$' || true
+        ;;
+    --reload)
+        reload
+        ;;
+    --tail)
+        echo "watching proxy decisions; TCP_DENIED means blocked. Ctrl-C to stop."
+        compose logs -f proxy
+        ;;
+    -*)
+        echo "usage: pi-allow [DOMAIN | --reload | --tail]" >&2
+        exit 2
+        ;;
+    *)
+        entry="$1"
+        if grep -qxF "${entry}" "${LOCAL_LIST}"; then
+            echo "already present: ${entry}"
+        else
+            printf '%s\n' "${entry}" >> "${LOCAL_LIST}"
+            echo "added: ${entry}"
+        fi
+        reload
+        ;;
+esac

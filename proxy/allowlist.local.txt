@@ -1,0 +1,16 @@
+# Your additions go here. Same syntax as allowlist.txt.
+#
+# After editing, apply without dropping the agent's session:
+#     ./pi-allow --reload
+# or add an entry and reload in one step:
+#     ./pi-allow .crates.io
+#
+# Keep at least one entry: squid refuses to start on an empty ACL file, and the
+# placeholder below is an unroutable TLD that can never match real traffic.
+.invalid
+
+# Examples, uncomment as needed:
+# .crates.io
+# .golang.org
+# .docs.python.org
+# .stackoverflow.com

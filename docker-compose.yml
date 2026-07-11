@@ -1,0 +1,159 @@
+name: pi-sandbox
+
+networks:
+  # The agent lives here and nowhere else. `internal: true` means Docker
+  # installs no default route and no NAT: there is physically nowhere for a
+  # packet to go except the proxy.
+  pi-egress:
+    internal: true
+    # Pinned so squid's source ACL can name this network exactly, instead of
+    # trusting all of RFC1918 (which would include the proxy's outbound leg).
+    ipam:
+      config:
+        - subnet: 172.28.167.0/24
+  # The proxy's second leg, with normal outbound access to your LAN and beyond.
+  # The subnet is pinned so the host always appears at a known, stable address
+  # (172.28.166.1) on this bridge. That gives an SSH tunnel a fixed place to
+  # bind that is reachable from the proxy but not exposed to your LAN.
+  pi-outbound:
+    ipam:
+      config:
+        - subnet: 172.28.166.0/24
+          gateway: 172.28.166.1
+
+volumes:
+  pi-config:      # ~/.pi — sessions, settings, models.json, trust decisions
+  pi-npm-cache:
+  pi-pip-cache:
+
+services:
+  proxy:
+    build: ./proxy
+    networks: [pi-egress, pi-outbound]
+    # NOTE: deliberately no `extra_hosts: host.docker.internal:host-gateway`.
+    # Docker Desktop (and Colima/Rancher/OrbStack) already provide that name,
+    # pointing at the real host. Adding the override replaces it with the bridge
+    # gateway *inside the VM* -- which is not the host, and nothing listens
+    # there, so every connection gets refused (squid logs 503 TCP_TUNNEL).
+    # Linux has no such name; use the pinned gateway 172.28.166.1 instead,
+    # or the `tunnel` service below, which sidesteps host networking entirely.
+    environment:
+      PI_BASE_URL: ${PI_BASE_URL:?set PI_BASE_URL in .env}
+    volumes:
+      - ./proxy/allowlist.txt:/etc/squid/allowlist.txt:ro
+      - ./proxy/allowlist.local.txt:/etc/squid/allowlist.local.txt:ro
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    healthcheck:
+      # `squid -k check` needs a pid file, which we don't have. A TCP probe of
+      # the listener is what we actually care about anyway. start_interval keeps
+      # the agent's depends_on: service_healthy from stalling behind the 30s
+      # steady-state interval; squid is typically healthy within ~2s.
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 3128 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+      start_interval: 2s
+
+  # Optional: run the SSH tunnel inside the compose project instead of on the
+  # host. Enable with `docker compose --profile tunnel up -d tunnel`.
+  #
+  # This is the reliable option. It depends on no host-networking magic, behaves
+  # identically on macOS and Linux, and the forwarded port is bound inside a
+  # container rather than on your host, so nothing is exposed to your LAN.
+  # The agent cannot reach it directly -- `tunnel` sits on pi-outbound only, so
+  # the request still has to pass the proxy's allowlist.
+  #
+  # With this running, set: PI_BASE_URL=http://tunnel:11666/v1
+  tunnel:
+    profiles: [tunnel]
+    build: ./tunnel
+    networks: [pi-outbound]
+    environment:
+      SSH_TARGET: ${SSH_TARGET:?set SSH_TARGET, e.g. me@gpu-box}
+      SSH_REMOTE: ${SSH_REMOTE:-127.0.0.1:11434}
+      TUNNEL_PORT: ${TUNNEL_PORT:-11666}
+    volumes:
+      # Read-only: the tunnel needs your key, not the ability to change it.
+      - ${HOME}/.ssh:/home/tunnel/.ssh:ro
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    restart: unless-stopped
+
+  agent:
+    build:
+      context: .
+      args:
+        PI_VERSION: ${PI_VERSION:-latest}
+        USER_UID: ${USER_UID:-1000}
+        USER_GID: ${USER_GID:-1000}
+        PI_EXTENSIONS: ${PI_EXTENSIONS:-}
+        PI_APT_PACKAGES: ${PI_APT_PACKAGES:-}
+        PI_PIP_PACKAGES: ${PI_PIP_PACKAGES:-}
+    depends_on:
+      proxy:
+        condition: service_healthy
+    networks: [pi-egress]
+    # The project is mounted at its host path, not a fixed /work. pi keys saved
+    # sessions by working directory, so a fixed mountpoint would make every
+    # project share one session bucket and `pi -c` would resume across projects.
+    # A matching path also means file paths in pi's output are valid on the host.
+    working_dir: ${PI_MOUNT:-/work}
+    stdin_open: true
+    tty: true
+    init: true
+    environment:
+      # --- provider config, consumed by entrypoint.sh -> ~/.pi/agent/models.json
+      PI_BASE_URL: ${PI_BASE_URL:?set PI_BASE_URL in .env}
+      PI_API_KEY: ${PI_API_KEY:-dummy}
+      PI_MODEL_ID: ${PI_MODEL_ID:?set PI_MODEL_ID in .env}
+      PI_MODEL_NAME: ${PI_MODEL_NAME:-}
+      PI_PROVIDER: ${PI_PROVIDER:-local}
+      PI_CONTEXT_WINDOW: ${PI_CONTEXT_WINDOW:-131072}
+      PI_MAX_TOKENS: ${PI_MAX_TOKENS:-16384}
+      PI_REASONING: ${PI_REASONING:-false}
+      PI_COMPAT_JSON: ${PI_COMPAT_JSON:-}
+
+      # --- everything outbound goes through the allowlist, including pi's own
+      # --- model calls (pi installs undici's EnvHttpProxyAgent globally).
+      HTTP_PROXY: http://proxy:3128
+      HTTPS_PROXY: http://proxy:3128
+      http_proxy: http://proxy:3128
+      https_proxy: http://proxy:3128
+      NO_PROXY: localhost,127.0.0.1
+      no_proxy: localhost,127.0.0.1
+
+      npm_config_cache: /home/pi/.npm
+      PIP_CACHE_DIR: /home/pi/.cache/pip
+
+      TERM: ${TERM:-xterm-256color}
+      COLORTERM: ${COLORTERM:-truecolor}
+
+    volumes:
+      # Long syntax so a host path containing a colon or spaces can't be
+      # misparsed as short-form volume separators.
+      - type: bind
+        source: ${PI_WORKDIR:-.}
+        target: ${PI_MOUNT:-/work}
+      # Custom skills, read-only. pi only ever reads a configured skills path,
+      # so ro costs nothing -- and it means the agent cannot rewrite the
+      # instructions it is about to follow. Defaults to the bundled ./skills
+      # so the mount always resolves even when you haven't set PI_SKILLS_DIR.
+      - type: bind
+        source: ${PI_SKILLS_DIR:-./skills}
+        target: /opt/pi-skills
+        read_only: true
+      - pi-config:/home/pi/.pi
+      - pi-npm-cache:/home/pi/.npm
+      - pi-pip-cache:/home/pi/.cache/pip
+
+    tmpfs:
+      - /tmp:exec,mode=1777
+
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 1024
+    # Uncomment if you want a hard ceiling on a runaway build:
+    # mem_limit: 6g
+    # cpus: 4.0
