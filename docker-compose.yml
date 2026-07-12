@@ -110,10 +110,12 @@ services:
       PI_MODEL_ID: ${PI_MODEL_ID:?set PI_MODEL_ID in .env}
       PI_MODEL_NAME: ${PI_MODEL_NAME:-}
       PI_PROVIDER: ${PI_PROVIDER:-local}
+      PI_API: ${PI_API:-openai-completions}
       PI_CONTEXT_WINDOW: ${PI_CONTEXT_WINDOW:-131072}
       PI_MAX_TOKENS: ${PI_MAX_TOKENS:-16384}
       PI_REASONING: ${PI_REASONING:-false}
       PI_COMPAT_JSON: ${PI_COMPAT_JSON:-}
+      PI_COST_JSON: ${PI_COST_JSON:-}
 
       # --- everything outbound goes through the allowlist, including pi's own
       # --- model calls (pi installs undici's EnvHttpProxyAgent globally).
