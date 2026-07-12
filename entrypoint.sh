@@ -10,6 +10,22 @@ PI_CONTEXT_WINDOW="${PI_CONTEXT_WINDOW:-131072}"
 PI_MAX_TOKENS="${PI_MAX_TOKENS:-16384}"
 PI_REASONING="${PI_REASONING:-false}"
 
+# Which wire protocol pi speaks to the endpoint. Defaults to openai-completions
+# so a local OpenAI-compatible server (vLLM, llama.cpp, Ollama, ...) works with
+# no extra config -- exactly as before. Set to talk to a hosted API instead:
+#   anthropic-messages     the Anthropic API   (PI_BASE_URL=https://api.anthropic.com)
+#   openai-completions     OpenAI-compatible   (PI_BASE_URL=https://api.openai.com/v1)
+#   openai-responses       OpenAI Responses API
+#   google-generative-ai   Google Generative AI
+PI_API="${PI_API:-openai-completions}"
+
+# Per-token cost, surfaced in pi's /cost. Zeros by default (a local server is
+# free), so an unset value reproduces the previous models.json exactly. For a
+# paid API, set e.g.
+#   PI_COST_JSON='{"input":3,"output":15,"cacheRead":0.3,"cacheWrite":3.75}'
+# (dollars per million tokens, matching pi's convention).
+PI_COST_JSON="${PI_COST_JSON:-{\"input\":0,\"output\":0,\"cacheRead\":0,\"cacheWrite\":0}}"
+
 AGENT_DIR="${HOME}/.pi/agent"
 MODELS_JSON="${AGENT_DIR}/models.json"
 
@@ -118,15 +134,17 @@ git config --global --add safe.directory '*' 2>/dev/null || true
 # (extra providers, compat flags, additional models) survives a restart.
 provider_entry="$(jq -n \
     --arg baseUrl   "${PI_BASE_URL}" \
+    --arg api       "${PI_API}" \
     --arg keyRef    '$PI_API_KEY' \
     --arg id        "${PI_MODEL_ID}" \
     --arg name      "${PI_MODEL_NAME}" \
     --argjson ctx   "${PI_CONTEXT_WINDOW}" \
     --argjson maxT  "${PI_MAX_TOKENS}" \
     --argjson think "${PI_REASONING}" \
+    --argjson cost  "${PI_COST_JSON}" \
     '{
       baseUrl: $baseUrl,
-      api: "openai-completions",
+      api: $api,
       apiKey: $keyRef,
       models: [{
         id: $id,
@@ -135,7 +153,7 @@ provider_entry="$(jq -n \
         input: ["text"],
         contextWindow: $ctx,
         maxTokens: $maxT,
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+        cost: $cost
       }]
     }')"
 

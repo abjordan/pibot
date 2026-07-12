@@ -77,6 +77,36 @@ pi -p "explain build.rs"  # one-shot
 
 The generated provider entry is merged, not overwritten, so anything you add to `models.json` by hand survives a restart.
 
+## Using a hosted API (Anthropic / OpenAI)
+
+The sandbox works against a web endpoint just as well as a LAN server — no proxy or network changes. The egress allowlist for inference is generated from the host in `PI_BASE_URL`, so `api.anthropic.com` or `api.openai.com` is permitted automatically, and Squid tunnels the HTTPS `CONNECT` straight through (end-to-end TLS with the container's CA bundle — Squid never sees the plaintext).
+
+Two extra knobs make it work:
+
+- **`PI_API`** — the wire protocol pi speaks. Unset it defaults to `openai-completions`, so nothing changes for a local OpenAI-compatible server. Set it for a hosted API: `anthropic-messages`, `openai-completions`, `openai-responses`, or `google-generative-ai`.
+- **`PI_API_KEY`** — a real key now. It is still stored only as the `$PI_API_KEY` reference described above, so it never lands on the config volume.
+
+```ini
+# Anthropic API (note: no /v1 on the base URL)
+PI_BASE_URL=https://api.anthropic.com
+PI_API=anthropic-messages
+PI_API_KEY=sk-ant-...
+PI_MODEL_ID=claude-sonnet-4-5
+PI_CONTEXT_WINDOW=200000
+PI_MAX_TOKENS=64000
+PI_REASONING=true
+```
+
+```ini
+# OpenAI API (keep the /v1)
+PI_BASE_URL=https://api.openai.com/v1
+PI_API=openai-completions
+PI_API_KEY=sk-...
+PI_MODEL_ID=gpt-4o
+```
+
+For paid endpoints, set `PI_COST_JSON` (dollars per million tokens) so pi's `/cost` reports real spend; unset, costs stay at `0` as they do for a free local server. See `.env.example` for the full set of options.
+
 ## Reaching a tunnel on the host
 
 If your API server is only reachable through an SSH tunnel you run on the host, `localhost:11666` will not work from `.env`. Inside a container, `localhost` is the container's own loopback interface. Your tunnel is bound to the *host's* loopback, and nothing bridges the two.
