@@ -26,26 +26,50 @@ PI_API="${PI_API:-openai-completions}"
 # (dollars per million tokens, matching pi's convention).
 PI_COST_JSON="${PI_COST_JSON:-{\"input\":0,\"output\":0,\"cacheRead\":0,\"cacheWrite\":0}}"
 
-AGENT_DIR="${HOME}/.pi/agent"
-MODELS_JSON="${AGENT_DIR}/models.json"
+# Which agent to launch. `pi` is the default (vanilla pi coding agent); `omp`
+# runs the oh-my-pi fork (binary `omp`). They differ only in a few particulars,
+# captured here so the rest of the script stays agent-agnostic:
+#   - config lives under ~/.pi vs ~/.omp
+#   - the provider list is models.json (pi) vs models.yml (omp). omp reads YAML,
+#     and JSON is valid YAML, so the same jq-built entry serves both.
+#   - pi resolves an apiKey written as `$NAME` against the env; omp treats the
+#     value as a bare env-var *name* first, falling back to a literal. So the
+#     stored reference is `$PI_API_KEY` for pi, `PI_API_KEY` for omp. Either way
+#     the secret stays in the env and never lands in the config volume.
+PI_AGENT="${PI_AGENT:-pi}"
+case "${PI_AGENT}" in
+    pi)  AGENT_BIN=pi;  AGENT_CONFIG_HOME="${HOME}/.pi";  MODELS_FILE=models.json; KEY_REF='$PI_API_KEY' ;;
+    omp) AGENT_BIN=omp; AGENT_CONFIG_HOME="${HOME}/.omp"; MODELS_FILE=models.yml;  KEY_REF='PI_API_KEY'  ;;
+    *)   echo "error: PI_AGENT must be 'pi' or 'omp', got '${PI_AGENT}'" >&2; exit 1 ;;
+esac
+
+AGENT_DIR="${AGENT_CONFIG_HOME}/agent"
+MODELS_JSON="${AGENT_DIR}/${MODELS_FILE}"
 
 # A named volume created before the image pre-created this path will be owned by
 # root, and no amount of rebuilding fixes an already-populated volume.
 if ! mkdir -p "${AGENT_DIR}" 2>/dev/null || [ ! -w "${AGENT_DIR}" ]; then
-    cat >&2 <<'MSG'
-error: cannot write to ~/.pi -- the pi-config volume is owned by root.
+    config_vol="$([ "${PI_AGENT}" = omp ] && echo pi-sandbox_omp-config || echo pi-sandbox_pi-config)"
+    cat >&2 <<MSG
+error: cannot write to ${AGENT_CONFIG_HOME} -- the config volume is owned by root.
 
 Docker seeds a named volume's ownership only the first time it is used, so a
 volume created by an older build stays root-owned forever. Recreate it:
 
     docker compose down
-    docker volume rm pi-sandbox_pi-config pi-sandbox_pi-npm-cache pi-sandbox_pi-pip-cache
+    docker volume rm ${config_vol} pi-sandbox_pi-npm-cache pi-sandbox_pi-pip-cache
     docker compose build
 MSG
     exit 1
 fi
 
 [ -f "${MODELS_JSON}" ] || echo '{}' > "${MODELS_JSON}"
+
+# The extension seeding and skills registration below are pi-specific: they
+# target pi's settings.json format and the /opt/pi-seed (`pi install`) layout.
+# oh-my-pi uses a different config schema and skill-discovery model, so for omp
+# we skip straight to the provider entry. (omp skills parity is a follow-up.)
+if [ "${PI_AGENT}" = pi ]; then
 
 # Merge in any extensions installed at build time (see Dockerfile,
 # PI_EXTENSIONS). They land at $SEED_HOME rather than directly under ~/.pi,
@@ -121,21 +145,24 @@ if [ -n "${skill_paths}" ]; then
        "${SETTINGS_JSON}" > "${tmp}" && mv "${tmp}" "${SETTINGS_JSON}"
 fi
 
+fi  # end pi-only extension + skills setup
+
 # The bind-mounted project is owned by the host user; git refuses to operate
 # on "dubious ownership" even when the uids match across a mount boundary.
 git config --global --add safe.directory '*' 2>/dev/null || true
 
-# Build the provider entry. Note the apiKey value: pi resolves a leading `$NAME`
-# against the process environment at request time, so we store the *reference*,
-# not the secret. The token stays in the container's env and never touches the
-# ~/.pi volume on disk.
+# Build the provider entry. Note the apiKey value (${KEY_REF}): it is a
+# *reference* to the env var, not the secret itself -- pi resolves a leading
+# `$NAME` at request time, omp treats the value as an env-var name. Either way
+# the token stays in the container's env and never touches the config volume.
 #
-# We merge rather than overwrite, so anything you add to models.json by hand
-# (extra providers, compat flags, additional models) survives a restart.
+# The same jq object serves both agents: pi reads models.json and omp reads
+# models.yml, and JSON is valid YAML. We merge rather than overwrite, so
+# anything you add by hand (extra providers, compat flags, models) survives.
 provider_entry="$(jq -n \
     --arg baseUrl   "${PI_BASE_URL}" \
     --arg api       "${PI_API}" \
-    --arg keyRef    '$PI_API_KEY' \
+    --arg keyRef    "${KEY_REF}" \
     --arg id        "${PI_MODEL_ID}" \
     --arg name      "${PI_MODEL_NAME}" \
     --argjson ctx   "${PI_CONTEXT_WINDOW}" \
@@ -168,11 +195,17 @@ jq --arg p "${PI_PROVIDER}" --argjson entry "${provider_entry}" \
    '.providers = ((.providers // {}) + { ($p): $entry })' \
    "${MODELS_JSON}" > "${tmp}" && mv "${tmp}" "${MODELS_JSON}"
 
-# `pi update` / `pi install` and friends take no --provider flag, so let them through raw.
+# Management subcommands take no provider/model selector, so let them through raw.
 case "${1:-}" in
     install|uninstall|update|config|list|packages)
-        exec pi "$@"
+        exec "${AGENT_BIN}" "$@"
         ;;
 esac
 
-exec pi --provider "${PI_PROVIDER}" --model "${PI_MODEL_ID}" "$@"
+# pi selects with --provider + --model; omp's --provider is legacy and it
+# prefers a canonical `provider/modelId` selector passed to --model.
+if [ "${PI_AGENT}" = omp ]; then
+    exec omp --model "${PI_PROVIDER}/${PI_MODEL_ID}" "$@"
+else
+    exec pi --provider "${PI_PROVIDER}" --model "${PI_MODEL_ID}" "$@"
+fi
