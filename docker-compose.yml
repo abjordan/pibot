@@ -71,7 +71,12 @@ services:
     build: ./tunnel
     networks: [pi-outbound]
     environment:
-      SSH_TARGET: ${SSH_TARGET:?set SSH_TARGET, e.g. me@gpu-box}
+      # Optional here (`:-`, not `:?`) so it doesn't block the agent. Compose
+      # interpolates the whole file before applying profiles, so a required
+      # `:?` on this tunnel-only variable would fail every `./pi` run even
+      # though the tunnel service isn't started. The tunnel's own entrypoint
+      # enforces that SSH_TARGET is set, but only when the tunnel actually runs.
+      SSH_TARGET: ${SSH_TARGET:-}
       SSH_REMOTE: ${SSH_REMOTE:-127.0.0.1:11434}
       TUNNEL_PORT: ${TUNNEL_PORT:-11666}
     volumes:
