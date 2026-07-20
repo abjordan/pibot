@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Launch oh-my-pi (the `omp` binary) in the same sandbox as ./pi.
+#
+#   omp                       interactive session in $PWD
+#   omp "refactor the parser" interactive with an opening prompt
+#   omp -p "summarize this"   one-shot, non-interactive
+#
+# This is a thin wrapper: it flips PI_AGENT to omp and defers to ./pi for all
+# the real work (env checks, project mount, skills mounts, compose invocation).
+# The agent's entrypoint reads PI_AGENT and launches omp instead of pi, writing
+# its provider config to ~/.omp/agent/models.yml. Any flag omp understands is
+# forwarded verbatim.
+#
+# Requires an image built with omp present: `docker compose build agent`.
+set -euo pipefail
+
+HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+# Compose interpolates PI_AGENT into the agent service's environment, so an
+# exported value here reaches the container (shell env wins over .env).
+export PI_AGENT=omp
+
+# Invoke ./pi through bash so this works whether or not pi has its exec bit set.
+exec bash "${HERE}/pi" "$@"

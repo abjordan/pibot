@@ -39,6 +39,14 @@ ENV VIRTUAL_ENV=/opt/venv \
 RUN npm install -g --ignore-scripts "@earendil-works/pi-coding-agent@${PI_VERSION}" \
     && npm cache clean --force
 
+# oh-my-pi (the `omp` binary), launched by ./omp instead of ./pi. It ships a
+# native engine fetched by an install script, so -- unlike pi -- it is NOT
+# installed with --ignore-scripts, or the engine would be missing at runtime.
+# Optional: build with --build-arg OMP_VERSION=... to pin a release.
+ARG OMP_VERSION=latest
+RUN npm install -g "@oh-my-pi/pi-coding-agent@${OMP_VERSION}" \
+    && npm cache clean --force
+
 # The node:* images ship a `node` user at uid 1000, which collides with most hosts' first user.
 # Reclaim the id so bind-mounted files come out owned by you, not by root or by `node`.
 RUN userdel -r node 2>/dev/null || true; \
@@ -53,7 +61,7 @@ RUN chown -R "${USER_UID}:${USER_GID}" /opt/venv
 # path does not exist, it creates it as root, which the unprivileged `pi` user
 # then cannot write to. Creating them here, owned by pi, is what makes the
 # volumes come up writable.
-RUN mkdir -p /home/pi/.pi/agent /home/pi/.npm /home/pi/.cache/pip \
+RUN mkdir -p /home/pi/.pi/agent /home/pi/.omp/agent /home/pi/.npm /home/pi/.cache/pip \
     && chown -R "${USER_UID}:${USER_GID}" /home/pi
 
 # Mountpoint parent for extra skills directories (PI_SKILLS_DIRS, attached by

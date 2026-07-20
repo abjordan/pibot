@@ -22,7 +22,8 @@ networks:
           gateway: 172.28.166.1
 
 volumes:
-  pi-config:      # ~/.pi — sessions, settings, models.json, trust decisions
+  pi-config:      # ~/.pi — pi sessions, settings, models.json, trust decisions
+  omp-config:     # ~/.omp — oh-my-pi sessions, config.yml, models.yml (used by ./omp)
   pi-npm-cache:
   pi-pip-cache:
 
@@ -91,6 +92,7 @@ services:
       context: .
       args:
         PI_VERSION: ${PI_VERSION:-latest}
+        OMP_VERSION: ${OMP_VERSION:-latest}
         USER_UID: ${USER_UID:-1000}
         USER_GID: ${USER_GID:-1000}
         PI_EXTENSIONS: ${PI_EXTENSIONS:-}
@@ -115,6 +117,9 @@ services:
       PI_MODEL_ID: ${PI_MODEL_ID:?set PI_MODEL_ID in .env}
       PI_MODEL_NAME: ${PI_MODEL_NAME:-}
       PI_PROVIDER: ${PI_PROVIDER:-local}
+      # Which agent the entrypoint launches: pi (default) or omp. The ./omp
+      # wrapper exports PI_AGENT=omp; ./pi leaves it unset.
+      PI_AGENT: ${PI_AGENT:-pi}
       PI_API: ${PI_API:-openai-completions}
       PI_CONTEXT_WINDOW: ${PI_CONTEXT_WINDOW:-131072}
       PI_MAX_TOKENS: ${PI_MAX_TOKENS:-16384}
@@ -152,6 +157,9 @@ services:
         target: /opt/pi-skills
         read_only: true
       - pi-config:/home/pi/.pi
+      # oh-my-pi's config/sessions, for ./omp. Harmlessly present (and unused)
+      # on plain ./pi runs; keeps omp state persistent across runs.
+      - omp-config:/home/pi/.omp
       - pi-npm-cache:/home/pi/.npm
       - pi-pip-cache:/home/pi/.cache/pip
 

@@ -7,10 +7,11 @@ Run the [pi coding agent](https://pi.dev) against your current directory, inside
 ```
 pi-sandbox/
 ├── .env                     ← your copy of .env.example
-├── Dockerfile               ← agent image: node + python + pi
+├── Dockerfile               ← agent image: node + python + pi + omp
 ├── docker-compose.yml
-├── entrypoint.sh            ← renders models.json, execs pi
+├── entrypoint.sh            ← renders the model config, execs pi (or omp)
 ├── pi                       ← launcher (chmod +x)
+├── omp                      ← same sandbox, launches oh-my-pi (chmod +x)
 ├── pi-allow                 ← allowlist helper (chmod +x)
 ├── skills/                  ← default custom-skills dir (or set PI_SKILLS_DIR)
 ├── proxy/
@@ -48,7 +49,7 @@ The agent talks to the proxy because pi installs undici's `EnvHttpProxyAgent` gl
 ## Setup
 
 ```bash
-chmod +x pi pi-allow
+chmod +x pi omp pi-allow
 cp .env.example .env
 $EDITOR .env          # set PI_BASE_URL, PI_API_KEY, PI_MODEL_ID
 docker compose build
@@ -61,6 +62,19 @@ Then, from any project directory:
 ```
 
 Symlink it onto your `PATH` if you like: `ln -s "$PWD/pi" ~/.local/bin/pi-safe`.
+
+### Running oh-my-pi instead
+
+`./omp` launches the [oh-my-pi](https://github.com/can1357/oh-my-pi) fork (the `omp` binary) inside the exact same sandbox — same proxy, same allowlist, same provider config from `.env`. It's a thin wrapper around `./pi` that flips one switch, so everything about networking and credentials works identically:
+
+```bash
+./omp                    # interactive oh-my-pi session in $PWD
+./omp -p "explain this"  # one-shot
+```
+
+The agent's entrypoint writes omp's provider config to `~/.omp/agent/models.yml` (persisted in the `omp-config` volume), reusing the same `PI_BASE_URL` / `PI_API` / `PI_API_KEY` / `PI_MODEL_ID` values — so a hosted Anthropic/OpenAI endpoint or a local server works for `./omp` with no extra configuration. Both agents are baked into the one image, so no separate build is needed.
+
+Two current limitations vs `./pi`: custom **skills** and **extensions** (`PI_SKILLS_DIR*`, `PI_EXTENSIONS`) are registered only for pi — oh-my-pi uses a different config schema for those, so they're a follow-up. Provider/model selection, cost, reasoning, and compat flags all apply to both.
 
 The wrapper mounts `$PWD` at the same path inside the container, passes your uid/gid so new files come out owned by you, and forwards every argument to pi. The matching path matters: pi keys saved sessions by working directory, so each project gets its own session history and `pi -c` resumes the right one.
 
