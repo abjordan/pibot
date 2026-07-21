@@ -219,6 +219,25 @@ jq --arg p "${PI_PROVIDER}" --argjson entry "${provider_entry}" \
    '.providers = ((.providers // {}) + { ($p): $entry })' \
    "${MODELS_JSON}" > "${tmp}" && mv "${tmp}" "${MODELS_JSON}"
 
+# omp resolves credentials through a chain that ends in the provider's
+# conventional env var, and its built-in providers fall back to *interactive
+# OAuth login* when none is found -- which we never want in this sealed
+# container. So map PI_API_KEY onto the conventional variable for the wire
+# protocol in use, unless the user already set it. The token stays in the
+# process environment and never lands on the config volume, same as PI_API_KEY.
+# pi reads the apiKey reference from models.json and needs none of this.
+if [ "${PI_AGENT}" = omp ]; then
+    case "${PI_API}" in
+        anthropic-messages)                  key_env=ANTHROPIC_API_KEY ;;
+        openai-completions|openai-responses) key_env=OPENAI_API_KEY    ;;
+        google-generative-ai)                key_env=GEMINI_API_KEY    ;;
+        *)                                   key_env=                  ;;
+    esac
+    if [ -n "${key_env}" ] && [ -z "${!key_env:-}" ]; then
+        export "${key_env}=${PI_API_KEY:-}"
+    fi
+fi
+
 # Management subcommands take no provider/model selector, so let them through raw.
 case "${1:-}" in
     install|uninstall|update|config|list|packages)
