@@ -26,6 +26,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3-venv \
         ripgrep \
         build-essential \
+        unzip \
     && rm -rf /var/lib/apt/lists/*
 
 # Debian marks the system python as externally-managed, so `pip install` fails out of the box.
@@ -39,10 +40,19 @@ ENV VIRTUAL_ENV=/opt/venv \
 RUN npm install -g --ignore-scripts "@earendil-works/pi-coding-agent@${PI_VERSION}" \
     && npm cache clean --force
 
-# oh-my-pi (the `omp` binary), launched by ./omp instead of ./pi. It ships a
-# native engine fetched by an install script, so -- unlike pi -- it is NOT
-# installed with --ignore-scripts, or the engine would be missing at runtime.
-# Optional: build with --build-arg OMP_VERSION=... to pin a release.
+# oh-my-pi is Bun-first: the `omp` bin has a `#!/usr/bin/env bun` shebang and
+# its native engine runs under Bun, not Node. Install Bun globally so it lands
+# on PATH (the `bun` npm package fetches the platform binary in a postinstall,
+# which is why this must not run with --ignore-scripts).
+ARG BUN_VERSION=latest
+RUN npm install -g "bun@${BUN_VERSION}" \
+    && npm cache clean --force \
+    && bun --version
+
+# oh-my-pi (the `omp` binary), launched by ./omp instead of ./pi. Installed with
+# npm so the bin lands in the global prefix already on PATH; scripts stay enabled
+# (unlike pi) so its native engine is fetched. It still executes under Bun via
+# the shebang above. Optional: build with --build-arg OMP_VERSION=... to pin.
 ARG OMP_VERSION=latest
 RUN npm install -g "@oh-my-pi/pi-coding-agent@${OMP_VERSION}" \
     && npm cache clean --force
