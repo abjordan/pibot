@@ -10,6 +10,30 @@ PI_CONTEXT_WINDOW="${PI_CONTEXT_WINDOW:-131072}"
 PI_MAX_TOKENS="${PI_MAX_TOKENS:-16384}"
 PI_REASONING="${PI_REASONING:-false}"
 
+# PI_REASONING is pi's `reasoning` field: a strict boolean toggling *whether* the
+# model does extended thinking. It does NOT choose the thinking *style*. Reject a
+# non-boolean here with a clear message instead of letting jq --argjson fail with
+# an opaque "invalid JSON text" further down.
+case "${PI_REASONING}" in
+    true|false) ;;
+    *)
+        cat >&2 <<MSG
+error: PI_REASONING must be 'true' or 'false' (got '${PI_REASONING}').
+
+It only toggles whether the model thinks -- it does not select a thinking mode.
+If a hosted Anthropic model rejected "thinking.type.enabled" and told you to use
+"thinking.type.adaptive", that is a separate switch: keep PI_REASONING=true and
+turn on adaptive thinking via the provider compat flag, e.g. in .env:
+
+    PI_COMPAT_JSON={"forceAdaptiveThinking":true}
+
+That makes pi send thinking.type "adaptive" + output_config.effort, which the
+current Claude models require.
+MSG
+        exit 1
+        ;;
+esac
+
 # Which wire protocol pi speaks to the endpoint. Defaults to openai-completions
 # so a local OpenAI-compatible server (vLLM, llama.cpp, Ollama, ...) works with
 # no extra config -- exactly as before. Set to talk to a hosted API instead:

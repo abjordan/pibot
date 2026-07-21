@@ -109,7 +109,12 @@ PI_MODEL_ID=claude-sonnet-4-5
 PI_CONTEXT_WINDOW=200000
 PI_MAX_TOKENS=64000
 PI_REASONING=true
+# Current Claude models require the newer adaptive-thinking format. Without this
+# they return 400 "thinking.type.enabled is not supported":
+PI_COMPAT_JSON={"forceAdaptiveThinking":true}
 ```
+
+> **`PI_REASONING` is a boolean** (`true`/`false`) — it only toggles *whether* the model thinks. It does not select the thinking style, so `PI_REASONING=adaptive` is invalid. To make pi speak the newer Anthropic thinking API (`thinking.type=adaptive` + `output_config.effort`), keep `PI_REASONING=true` and set `PI_COMPAT_JSON={"forceAdaptiveThinking":true}` as above.
 
 ```ini
 # OpenAI API (keep the /v1)
