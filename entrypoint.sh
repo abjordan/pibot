@@ -60,10 +60,17 @@ PI_COST_JSON="${PI_COST_JSON:-{\"input\":0,\"output\":0,\"cacheRead\":0,\"cacheW
 #     value as a bare env-var *name* first, falling back to a literal. So the
 #     stored reference is `$PI_API_KEY` for pi, `PI_API_KEY` for omp. Either way
 #     the secret stays in the env and never lands in the config volume.
+#   - the provider *name* differs. omp ships a catalog of built-in providers
+#     (anthropic, openai, google, ...) whose Anthropic entry is OAuth/bearer-first
+#     -- selecting it makes omp prompt for interactive login, or send a raw
+#     sk-ant- key as an Authorization: Bearer token (Anthropic: 401 "Invalid
+#     bearer token"). So omp gets a private, collision-proof provider name; its
+#     `api: anthropic-messages` + apiKey then authenticates with x-api-key, the
+#     way pi already does. pi has no such catalog, so it keeps PI_PROVIDER.
 PI_AGENT="${PI_AGENT:-pi}"
 case "${PI_AGENT}" in
-    pi)  AGENT_BIN=pi;  AGENT_CONFIG_HOME="${HOME}/.pi";  MODELS_FILE=models.json; KEY_REF='$PI_API_KEY' ;;
-    omp) AGENT_BIN=omp; AGENT_CONFIG_HOME="${HOME}/.omp"; MODELS_FILE=models.yml;  KEY_REF='PI_API_KEY'  ;;
+    pi)  AGENT_BIN=pi;  AGENT_CONFIG_HOME="${HOME}/.pi";  MODELS_FILE=models.json; KEY_REF='$PI_API_KEY'; AGENT_PROVIDER="${PI_PROVIDER}" ;;
+    omp) AGENT_BIN=omp; AGENT_CONFIG_HOME="${HOME}/.omp"; MODELS_FILE=models.yml;  KEY_REF='PI_API_KEY';  AGENT_PROVIDER=pibot-sandbox ;;
     *)   echo "error: PI_AGENT must be 'pi' or 'omp', got '${PI_AGENT}'" >&2; exit 1 ;;
 esac
 
@@ -215,28 +222,9 @@ if [ -n "${PI_COMPAT_JSON:-}" ]; then
 fi
 
 tmp="$(mktemp)"
-jq --arg p "${PI_PROVIDER}" --argjson entry "${provider_entry}" \
+jq --arg p "${AGENT_PROVIDER}" --argjson entry "${provider_entry}" \
    '.providers = ((.providers // {}) + { ($p): $entry })' \
    "${MODELS_JSON}" > "${tmp}" && mv "${tmp}" "${MODELS_JSON}"
-
-# omp resolves credentials through a chain that ends in the provider's
-# conventional env var, and its built-in providers fall back to *interactive
-# OAuth login* when none is found -- which we never want in this sealed
-# container. So map PI_API_KEY onto the conventional variable for the wire
-# protocol in use, unless the user already set it. The token stays in the
-# process environment and never lands on the config volume, same as PI_API_KEY.
-# pi reads the apiKey reference from models.json and needs none of this.
-if [ "${PI_AGENT}" = omp ]; then
-    case "${PI_API}" in
-        anthropic-messages)                  key_env=ANTHROPIC_API_KEY ;;
-        openai-completions|openai-responses) key_env=OPENAI_API_KEY    ;;
-        google-generative-ai)                key_env=GEMINI_API_KEY    ;;
-        *)                                   key_env=                  ;;
-    esac
-    if [ -n "${key_env}" ] && [ -z "${!key_env:-}" ]; then
-        export "${key_env}=${PI_API_KEY:-}"
-    fi
-fi
 
 # Management subcommands take no provider/model selector, so let them through raw.
 case "${1:-}" in
@@ -246,9 +234,11 @@ case "${1:-}" in
 esac
 
 # pi selects with --provider + --model; omp's --provider is legacy and it
-# prefers a canonical `provider/modelId` selector passed to --model.
+# prefers a canonical `provider/modelId` selector passed to --model. The exact
+# `provider/modelId` form also bypasses omp's coalescing, pinning our private
+# provider instead of a built-in catalog entry with the same model id.
 if [ "${PI_AGENT}" = omp ]; then
-    exec omp --model "${PI_PROVIDER}/${PI_MODEL_ID}" "$@"
+    exec omp --model "${AGENT_PROVIDER}/${PI_MODEL_ID}" "$@"
 else
-    exec pi --provider "${PI_PROVIDER}" --model "${PI_MODEL_ID}" "$@"
+    exec pi --provider "${AGENT_PROVIDER}" --model "${PI_MODEL_ID}" "$@"
 fi
