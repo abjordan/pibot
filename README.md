@@ -74,6 +74,8 @@ Symlink it onto your `PATH` if you like: `ln -s "$PWD/pi" ~/.local/bin/pi-safe`.
 
 The agent's entrypoint writes omp's provider config to `~/.omp/agent/models.yml` (persisted in the `omp-config` volume), reusing the same `PI_BASE_URL` / `PI_API` / `PI_API_KEY` / `PI_MODEL_ID` values — so a hosted Anthropic/OpenAI endpoint or a local server works for `./omp` with no extra configuration. Both agents are baked into the one image, so no separate build is needed.
 
+To keep everything non-interactive, omp is pointed at a private, collision-proof provider (`pibot-sandbox`) rather than one of its built-in catalog entries. Those built-ins are OAuth-first — selecting one makes omp prompt for an in-container login, or send a raw `sk-ant-…` key as a bearer token (which the Anthropic API rejects with `401 Invalid bearer token`). Under the private provider, your `PI_API_KEY` authenticates the normal way (`x-api-key`), exactly as it does for `./pi`. `PI_PROVIDER` therefore applies to `./pi` only.
+
 Two current limitations vs `./pi`: custom **skills** and **extensions** (`PI_SKILLS_DIR*`, `PI_EXTENSIONS`) are registered only for pi — oh-my-pi uses a different config schema for those, so they're a follow-up. Provider/model selection, cost, reasoning, and compat flags all apply to both.
 
 The wrapper mounts `$PWD` at the same path inside the container, passes your uid/gid so new files come out owned by you, and forwards every argument to pi. The matching path matters: pi keys saved sessions by working directory, so each project gets its own session history and `pi -c` resumes the right one.
