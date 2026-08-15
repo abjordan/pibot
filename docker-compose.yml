@@ -20,6 +20,10 @@ networks:
       config:
         - subnet: 172.28.166.0/24
           gateway: 172.28.166.1
+  # The status viewer's own bridge. It is deliberately not pi-egress: the agent
+  # cannot reach the viewer and the viewer cannot reach the agent. Everything
+  # the viewer knows arrives one way, through read-only volume mounts.
+  pi-status:
 
 volumes:
   pi-config:      # ~/.pi — pi sessions, settings, models.json, trust decisions
@@ -143,6 +147,14 @@ services:
       TERM: ${TERM:-xterm-256color}
       COLORTERM: ${COLORTERM:-truecolor}
 
+      # --- web status view. PIBOT_RUN is minted per invocation by the ./pi
+      # --- wrapper; PIBOT_LABEL is yours to set. PIBOT_STATUS=0 disables both
+      # --- the run registry and the status extension.
+      PIBOT_STATUS: ${PIBOT_STATUS:-1}
+      PIBOT_SESSION_ID: ${PIBOT_SESSION_ID:-1}
+      PIBOT_RUN: ${PIBOT_RUN:-}
+      PIBOT_LABEL: ${PIBOT_LABEL:-}
+
     volumes:
       # Long syntax so a host path containing a colon or spaces can't be
       # misparsed as short-form volume separators.
@@ -157,6 +169,12 @@ services:
         source: ${PI_SKILLS_DIR:-./skills}
         target: /opt/pi-skills
         read_only: true
+      # The status extension. Read-only for the same reason skills are: the
+      # agent should not be able to rewrite the code reporting on it.
+      - type: bind
+        source: ./status/extension
+        target: /opt/pibot-status
+        read_only: true
       - pi-config:/home/pi/.pi
       # oh-my-pi's config/sessions, for ./omp. Harmlessly present (and unused)
       # on plain ./pi runs; keeps omp state persistent across runs.
@@ -170,6 +188,43 @@ services:
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     pids_limit: 1024
-    # Uncomment if you want a hard ceiling on a runaway build:
+    # Worth setting once you run several agents at once -- each one carries a
+    # node, a bun and a python, and one runaway build should not take the box
+    # down with it:
     # mem_limit: 6g
     # cpus: 4.0
+
+  # Read-only web view of what every agent container is doing. Start it with
+  # ./pi-status (or `docker compose --profile status up -d status`); it serves
+  # one page covering all concurrent runs, so there is no port per agent.
+  #
+  # It reads the config volumes and nothing else. No Docker socket, no route to
+  # the agent, no credentials -- see status/server.mjs.
+  status:
+    profiles: [status]
+    build:
+      context: ./status
+      args:
+        PI_VERSION: ${PI_VERSION:-latest}
+    networks: [pi-status]
+    # Loopback by default. To reach it from another machine, forward it over ssh
+    # or a VPN rather than widening this -- and if you do widen it, set
+    # PIBOT_STATUS_TOKEN.
+    ports:
+      - "${PIBOT_STATUS_BIND:-127.0.0.1:8787}:8787"
+    user: "${USER_UID:-1000}:${USER_GID:-1000}"
+    environment:
+      HOME: /tmp
+      PIBOT_STATUS_TOKEN: ${PIBOT_STATUS_TOKEN:-}
+      PIBOT_STATUS_MAX_AGE_DAYS: ${PIBOT_STATUS_MAX_AGE_DAYS:-14}
+      PIBOT_STATUS_EXPORT: ${PIBOT_STATUS_EXPORT:-1}
+    volumes:
+      - pi-config:/data/pi:ro
+      - omp-config:/data/omp:ro
+    tmpfs:
+      - /tmp:mode=1777
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    restart: unless-stopped

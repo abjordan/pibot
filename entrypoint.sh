@@ -96,6 +96,25 @@ fi
 
 [ -f "${MODELS_JSON}" ] || echo '{}' > "${MODELS_JSON}"
 
+# --- serialize config mutations across concurrent agent containers -----------
+# Several ./pi runs can start in the same second, and every one of them
+# read-modify-writes models.json and settings.json in the *shared* config
+# volume. Each write is `jq > tmp && mv`, so mv's atomicity means nothing ever
+# corrupts -- but without a lock the last writer silently discards the others'
+# merges, and a seeded extension registration can vanish for no visible reason.
+# pi locks its own settings/trust/auth writes with proper-lockfile; this covers
+# ours. Held until after the provider entry is merged, then released.
+CONFIG_LOCK="${AGENT_DIR}/.pibot-config.lock"
+config_locked=false
+if command -v flock >/dev/null 2>&1; then
+    exec 9>"${CONFIG_LOCK}"
+    if flock -w 30 9; then
+        config_locked=true
+    else
+        echo "warning: timed out waiting for ${CONFIG_LOCK}; continuing without the lock" >&2
+    fi
+fi
+
 # The extension seeding and skills registration below are pi-specific: they
 # target pi's settings.json format and the /opt/pi-seed (`pi install`) layout.
 # oh-my-pi uses a different config schema and skill-discovery model, so for omp
@@ -176,6 +195,29 @@ if [ -n "${skill_paths}" ]; then
        "${SETTINGS_JSON}" > "${tmp}" && mv "${tmp}" "${SETTINGS_JSON}"
 fi
 
+# Register (or unregister) the status extension, mounted read-only from the
+# repo's status/extension directory. It publishes this run's live state into the
+# run registry that the status viewer reads; see status/extension/index.ts.
+#
+# Toggling PIBOT_STATUS has to remove the entry as well as add it: settings.json
+# lives in a persistent volume, so a stale path would otherwise linger there
+# long after the feature was turned off.
+STATUS_EXT=/opt/pibot-status/index.ts
+SETTINGS_JSON="${AGENT_DIR}/settings.json"
+if [ "${PIBOT_STATUS:-1}" != "0" ] && [ -f "${STATUS_EXT}" ]; then
+    [ -f "${SETTINGS_JSON}" ] || echo '{}' > "${SETTINGS_JSON}"
+    tmp="$(mktemp)"
+    jq --arg ext "${STATUS_EXT}" \
+       '.extensions = (((.extensions // []) + [$ext])
+                       | reduce .[] as $e ([]; if index([$e]) then . else . + [$e] end))' \
+       "${SETTINGS_JSON}" > "${tmp}" && mv "${tmp}" "${SETTINGS_JSON}"
+elif [ -f "${SETTINGS_JSON}" ]; then
+    tmp="$(mktemp)"
+    jq --arg ext "${STATUS_EXT}" \
+       'if .extensions then .extensions |= map(select(. != $ext)) else . end' \
+       "${SETTINGS_JSON}" > "${tmp}" && mv "${tmp}" "${SETTINGS_JSON}"
+fi
+
 fi  # end pi-only extension + skills setup
 
 # The bind-mounted project is owned by the host user; git refuses to operate
@@ -226,6 +268,18 @@ jq --arg p "${AGENT_PROVIDER}" --argjson entry "${provider_entry}" \
    '.providers = ((.providers // {}) + { ($p): $entry })' \
    "${MODELS_JSON}" > "${tmp}" && mv "${tmp}" "${MODELS_JSON}"
 
+# Config is settled; let the next container in.
+#
+# Note the bare `exec 9>&-`: an `exec` carrying any other redirection would
+# apply it to the rest of this script *and* to the agent it execs at the end, so
+# a defensive-looking `2>/dev/null` here would silently discard every error pi
+# ever printed. Closing an fd that was never opened is not an error, so this
+# needs no guard.
+if [ "${config_locked}" = true ]; then
+    flock -u 9
+fi
+exec 9>&-
+
 # Management subcommands take no provider/model selector, so let them through raw.
 case "${1:-}" in
     install|uninstall|update|config|list|packages)
@@ -233,12 +287,128 @@ case "${1:-}" in
         ;;
 esac
 
+# --- per-run identity --------------------------------------------------------
+# Every ./pi invocation is its own container, and they all share one config
+# volume. Without a distinct session id per run, two agents in the same project
+# directory can end up appending to the same session file: pi writes session
+# entries with a plain appendFileSync and `-c` resolves to "most recent file for
+# this cwd" with no ownership check, so two conversations interleave into one
+# tree. Giving each run its own id also makes the session file self-identifying
+# -- the filename is <timestamp>_<sessionId>.jsonl, which is what lets the
+# status viewer attribute a transcript to a container without guessing.
+#
+# Session ids accept [A-Za-z0-9._-] and must start and end alphanumeric, so the
+# id the ./pi wrapper mints is human-readable rather than a bare UUID.
+PIBOT_RUN="${PIBOT_RUN:-run-$(date +%Y%m%d-%H%M%S)-$$}"
+export PIBOT_RUN
+# Always under ~/.pi even for omp: compose mounts both config volumes into every
+# agent container, so one registry covers both agents and the viewer has exactly
+# one place to look.
+PIBOT_RUN_DIR="${PIBOT_RUN_DIR:-${HOME}/.pi/agent/.pibot/runs}"
+export PIBOT_RUN_DIR
+
+session_args=()
+PIBOT_SESSION_ID_INJECTED=0
+wants_own_session=false
+wants_continue=false
+wants_name=false
+for arg in "$@"; do
+    case "${arg}" in
+        # Anything that selects a session explicitly wins over our id.
+        -c|--continue)                        wants_own_session=true; wants_continue=true ;;
+        -r|--resume|--session|--session-id|--fork|--no-session) wants_own_session=true ;;
+        -n|--name)                            wants_name=true ;;
+    esac
+done
+
+# omp is a fork with its own CLI surface and no guarantee of --session-id, so
+# the injection is pi-only. omp runs still get a run record; the viewer pairs it
+# with a transcript by working directory instead of by filename.
+if [ "${PI_AGENT}" = pi ]; then
+    # Its own switch, separate from PIBOT_STATUS: per-run session ids are about
+    # keeping concurrent containers off each other's transcripts, which matters
+    # whether or not anyone is watching the status page. Set PIBOT_SESSION_ID=0
+    # for pi's stock behavior (a fresh uuidv7 per session).
+    if [ "${wants_own_session}" = false ] && [ "${PIBOT_SESSION_ID:-1}" != "0" ]; then
+        session_args+=(--session-id "${PIBOT_RUN}")
+        PIBOT_SESSION_ID_INJECTED=1
+    fi
+    if [ -n "${PIBOT_LABEL:-}" ] && [ "${wants_name}" = false ]; then
+        session_args+=(--name "${PIBOT_LABEL}")
+    fi
+fi
+export PIBOT_SESSION_ID_INJECTED
+
+# --- run registry ------------------------------------------------------------
+# One small JSON record plus a heartbeat file per run. The record is refined by
+# the status extension once pi is up (it knows the exact session file); this is
+# the bootstrap version, and for omp it is the only version.
+if [ "${PIBOT_STATUS:-1}" != "0" ] && mkdir -p "${PIBOT_RUN_DIR}" 2>/dev/null; then
+    # Self-cleaning: records outlive their containers, so drop stale ones.
+    find "${PIBOT_RUN_DIR}" -maxdepth 1 -type f \( -name '*.json' -o -name '*.beat' \) \
+        -mtime +7 -delete 2>/dev/null || true
+
+    if [ "${wants_continue}" = true ]; then
+        # `-c` deliberately reuses an existing session file, which is the one
+        # case where two live containers can collide on the same transcript.
+        for beat in $(find "${PIBOT_RUN_DIR}" -maxdepth 1 -name '*.beat' -mmin -1 2>/dev/null); do
+            other="${beat%.beat}.json"
+            [ -f "${other}" ] || continue
+            [ "$(jq -r '.cwd // ""' "${other}" 2>/dev/null)" = "${PWD}" ] || continue
+            [ "$(jq -r '.runId // ""' "${other}" 2>/dev/null)" != "${PIBOT_RUN}" ] || continue
+            echo "warning: another live agent is running in ${PWD} ($(jq -r '.runId' "${other}" 2>/dev/null))." >&2
+            echo "warning: with -c you may both append to the same session file and interleave two conversations." >&2
+        done
+    fi
+
+    run_record="${PIBOT_RUN_DIR}/${PIBOT_RUN}.json"
+    tmp="$(mktemp)"
+    jq -n \
+        --arg runId     "${PIBOT_RUN}" \
+        --arg agent     "${PI_AGENT}" \
+        --arg label     "${PIBOT_LABEL:-}" \
+        --arg cwd       "${PWD}" \
+        --arg model     "${PI_MODEL_ID}" \
+        --arg provider  "${AGENT_PROVIDER}" \
+        --arg startedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        --argjson injected "${PIBOT_SESSION_ID_INJECTED}" \
+        '{
+          runId: $runId, source: "entrypoint", agent: $agent,
+          label: (if $label == "" then null else $label end),
+          cwd: $cwd, model: $model, provider: $provider,
+          startedAt: $startedAt, state: "starting",
+          sessionIdInjected: ($injected == 1)
+        }' > "${tmp}" && mv "${tmp}" "${run_record}"
+
+    # Liveness. The extension cannot provide this on its own -- a killed
+    # container never gets to write "ended", and for omp there is no extension
+    # at all -- so an mtime-only heartbeat is what distinguishes "thinking hard"
+    # from "gone". The loop is backgrounded before the exec below, gets
+    # reparented to the container's init when pi replaces this shell, and dies
+    # with the container.
+    #
+    # Its stdio is closed deliberately: a background child that keeps the
+    # container's stdout open would stop `./pi -p ... | something` from seeing
+    # EOF, and anything it printed would land in the middle of pi's TUI.
+    beat_file="${PIBOT_RUN_DIR}/${PIBOT_RUN}.beat"
+    (
+        while :; do
+            touch "${beat_file}" 2>/dev/null || exit 0
+            sleep 5
+        done
+    ) </dev/null >/dev/null 2>&1 &
+    disown 2>/dev/null || true
+fi
+
 # pi selects with --provider + --model; omp's --provider is legacy and it
 # prefers a canonical `provider/modelId` selector passed to --model. The exact
 # `provider/modelId` form also bypasses omp's coalescing, pinning our private
 # provider instead of a built-in catalog entry with the same model id.
+#
+# ${arr[@]+"${arr[@]}"} so an empty array doesn't trip `set -u`.
 if [ "${PI_AGENT}" = omp ]; then
     exec omp --model "${AGENT_PROVIDER}/${PI_MODEL_ID}" "$@"
 else
-    exec pi --provider "${AGENT_PROVIDER}" --model "${PI_MODEL_ID}" "$@"
+    exec pi --provider "${AGENT_PROVIDER}" --model "${PI_MODEL_ID}" \
+        ${session_args[@]+"${session_args[@]}"} "$@"
 fi

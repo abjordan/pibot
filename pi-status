@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# Start, stop, and inspect the read-only status viewer.
+#
+#   ./pi-status            start it (idempotent) and print the URL
+#   ./pi-status --url      print the URL and exit
+#   ./pi-status --logs     follow the viewer's log
+#   ./pi-status --build    rebuild the viewer image, then start
+#   ./pi-status --stop     stop and remove it
+#
+# The viewer is a separate container from the agent. It mounts the pi and omp
+# config volumes read-only and serves one page covering every concurrent run,
+# so running more agents needs no extra ports and no extra viewers.
+set -euo pipefail
+
+HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+if [ ! -f "${HERE}/.env" ]; then
+    echo "error: ${HERE}/.env not found. Run: cp ${HERE}/.env.example .env" >&2
+    exit 1
+fi
+
+# Matches the agent's uid so anything the viewer writes (nothing, today) and
+# everything it reads lines up with the files the agent produced.
+export USER_UID="${USER_UID:-$(id -u)}"
+export USER_GID="${USER_GID:-$(id -g)}"
+
+# Read from .env by hand rather than sourcing it: .env holds unquoted values
+# with spaces, and sourcing would try to execute them.
+env_value() {
+    local key="$1" val
+    val="$(sed -n "s/^[[:space:]]*${key}=//p" "${HERE}/.env" | tail -1)"
+    val="${val%\"}"; val="${val#\"}"
+    printf '%s' "${val}"
+}
+
+BIND="${PIBOT_STATUS_BIND:-$(env_value PIBOT_STATUS_BIND)}"
+BIND="${BIND:-127.0.0.1:8787}"
+TOKEN="${PIBOT_STATUS_TOKEN:-$(env_value PIBOT_STATUS_TOKEN)}"
+
+# "127.0.0.1:8787" -> host + port; a bare "8787" publishes on every interface.
+if [[ "${BIND}" == *:* ]]; then
+    HOST="${BIND%:*}"
+    PORT="${BIND##*:}"
+else
+    HOST="0.0.0.0"
+    PORT="${BIND}"
+fi
+[ "${HOST}" = "0.0.0.0" ] && DISPLAY_HOST="localhost" || DISPLAY_HOST="${HOST}"
+
+URL="http://${DISPLAY_HOST}:${PORT}/"
+[ -n "${TOKEN}" ] && URL="${URL}?token=${TOKEN}"
+
+compose() {
+    docker compose \
+        --file "${HERE}/docker-compose.yml" \
+        --env-file "${HERE}/.env" \
+        --profile status "$@"
+}
+
+case "${1:-}" in
+    --url)
+        echo "${URL}"
+        ;;
+    --stop)
+        compose rm --stop --force status
+        ;;
+    --logs)
+        compose logs --follow status
+        ;;
+    --build)
+        compose build status
+        compose up --detach status
+        echo "status viewer: ${URL}"
+        ;;
+    "")
+        compose up --detach status
+        echo "status viewer: ${URL}"
+        if [ "${HOST}" = "0.0.0.0" ] && [ -z "${TOKEN}" ]; then
+            echo "warning: PIBOT_STATUS_BIND exposes the viewer beyond loopback with no PIBOT_STATUS_TOKEN set." >&2
+        fi
+        ;;
+    *)
+        sed -n '2,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+        exit 1
+        ;;
+esac

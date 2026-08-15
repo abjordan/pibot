@@ -26,6 +26,23 @@ export PI_MOUNT="${PWD}"
 export USER_UID="$(id -u)"
 export USER_GID="$(id -g)"
 
+# --- run identity -------------------------------------------------------------
+# Each ./pi is a separate container sharing one config volume, so every run gets
+# its own id. The entrypoint passes it to pi as --session-id, which both keeps
+# concurrent runs off each other's session files and names the transcript after
+# the run (sessions are stored as <timestamp>_<sessionId>.jsonl) so the status
+# viewer can tell which container produced which conversation.
+#
+# pi accepts [A-Za-z0-9._-] with alphanumeric ends, so this stays readable.
+# Override by exporting PIBOT_RUN yourself; label a run with PIBOT_LABEL.
+if [ -z "${PIBOT_RUN:-}" ]; then
+    slug="$(basename "${PWD}" | tr -c 'A-Za-z0-9._' '-' | sed -e 's/^[^A-Za-z0-9]*//' -e 's/[^A-Za-z0-9]*$//' | cut -c1-32)"
+    [ -n "${slug}" ] || slug="run"
+    PIBOT_RUN="${slug}-$(date +%Y%m%d-%H%M%S)-$(printf '%04x' $((RANDOM % 65536)))"
+fi
+export PIBOT_RUN
+export PIBOT_LABEL="${PIBOT_LABEL:-}"
+
 # --- extra skills directories -------------------------------------------------
 # PI_SKILLS_DIR (singular) is a single dir handled by compose. PI_SKILLS_DIRS
 # (plural) is a colon-separated list, and compose cannot expand a variable into
