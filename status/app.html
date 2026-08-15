@@ -1,0 +1,392 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pibot status</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #f6f7f9;
+  --panel: #ffffff;
+  --panel-2: #f0f2f5;
+  --line: #dcdfe4;
+  --text: #16181d;
+  --dim: #656b76;
+  --accent: #2f6feb;
+  --live: #1a7f4b;
+  --tool: #a35c00;
+  --idle: #656b76;
+  --error: #c0392b;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1116;
+    --panel: #161b22;
+    --panel-2: #1c222b;
+    --line: #2b323c;
+    --text: #e6e9ef;
+    --dim: #99a1ad;
+    --accent: #6ea8fe;
+    --live: #3fb950;
+    --tool: #e3b341;
+    --idle: #99a1ad;
+    --error: #f85149;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+header {
+  position: sticky; top: 0; z-index: 5;
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 12px 16px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+h1 { font-size: 15px; margin: 0; font-weight: 650; letter-spacing: .2px; }
+.spacer { flex: 1; }
+.muted { color: var(--dim); }
+.small { font-size: 12px; }
+main { padding: 16px; max-width: 1400px; margin: 0 auto; }
+.grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); }
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px 14px;
+  cursor: pointer;
+  transition: border-color .15s, transform .05s;
+}
+.card:hover { border-color: var(--accent); }
+.card:active { transform: translateY(1px); }
+.card.live { border-left: 3px solid var(--live); }
+.card-top { display: flex; align-items: baseline; gap: 8px; }
+.name { font-weight: 620; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.badge {
+  font-size: 11px; font-weight: 650; letter-spacing: .3px; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 999px; border: 1px solid var(--line);
+  white-space: nowrap;
+}
+.badge.tool { color: var(--tool); border-color: color-mix(in srgb, var(--tool) 45%, transparent); }
+.badge.thinking { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+.badge.idle { color: var(--idle); }
+.badge.error { color: var(--error); border-color: color-mix(in srgb, var(--error) 45%, transparent); }
+.badge.ended, .badge.lost { color: var(--dim); }
+.path { font-family: var(--mono); font-size: 11.5px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.activity {
+  margin-top: 8px; padding: 7px 9px; border-radius: 7px;
+  background: var(--panel-2); font-family: var(--mono); font-size: 12px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.stats { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 9px; font-size: 12px; color: var(--dim); }
+.stats b { font-weight: 600; color: var(--text); }
+.warn { margin-top: 8px; font-size: 12px; color: var(--error); }
+.bar { height: 3px; border-radius: 2px; background: var(--panel-2); margin-top: 8px; overflow: hidden; }
+.bar > i { display: block; height: 100%; background: var(--accent); }
+button {
+  font: inherit; font-size: 13px; color: var(--text);
+  background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: 7px; padding: 5px 11px; cursor: pointer;
+}
+button:hover { border-color: var(--accent); }
+.empty { color: var(--dim); padding: 40px 0; text-align: center; }
+/* detail */
+.meta { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 0 0 14px; font-size: 12.5px; color: var(--dim); }
+.msg { border: 1px solid var(--line); border-radius: 9px; margin-bottom: 9px; background: var(--panel); overflow: hidden; }
+.msg > .head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 11px; background: var(--panel-2); border-bottom: 1px solid var(--line);
+  font-size: 11.5px; text-transform: uppercase; letter-spacing: .4px; color: var(--dim); font-weight: 650;
+}
+.msg > .body { padding: 9px 11px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; }
+.msg.user > .head { color: var(--accent); }
+.msg.assistant > .head { color: var(--text); }
+.msg.toolResult > .head, .msg.bash > .head { color: var(--tool); }
+.msg.error > .head { color: var(--error); }
+.msg .body.mono { font-family: var(--mono); font-size: 12px; }
+.calls { padding: 0 11px 9px; }
+.call {
+  font-family: var(--mono); font-size: 12px; padding: 5px 8px; border-radius: 6px;
+  background: var(--panel-2); margin-top: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.thinking { padding: 0 11px 8px; font-size: 12px; color: var(--dim); font-style: italic; }
+</style>
+</head>
+<body>
+<header>
+  <h1>pibot status</h1>
+  <span id="summary" class="muted small"></span>
+  <span class="spacer"></span>
+  <span id="tick" class="muted small"></span>
+  <button id="back" hidden>← all agents</button>
+</header>
+<main>
+  <div id="list" class="grid"></div>
+  <div id="detail" hidden></div>
+</main>
+<script>
+const qs = new URLSearchParams(location.search);
+const TOKEN = qs.get("token") || "";
+const api = (path, params = {}) => {
+  const u = new URL(path, location.origin);
+  for (const [k, v] of Object.entries(params)) if (v != null) u.searchParams.set(k, v);
+  if (TOKEN) u.searchParams.set("token", TOKEN);
+  return fetch(u).then((r) => r.json());
+};
+
+const el = (tag, cls, text) => {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text != null) n.textContent = text;
+  return n;
+};
+
+const ago = (ms) => {
+  if (ms == null) return "—";
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return s + "s";
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + "m " + (s % 60) + "s";
+  const h = Math.floor(m / 60);
+  if (h < 24) return h + "h " + (m % 60) + "m";
+  return Math.floor(h / 24) + "d " + (h % 24) + "h";
+};
+const money = (n) => (n == null ? "—" : n < 0.01 && n > 0 ? "<$0.01" : "$" + n.toFixed(2));
+const num = (n) => (n == null ? "—" : n.toLocaleString());
+
+// A run record (when the extension is loaded) knows more than the file does.
+function stateOf(card) {
+  const s = card.session || {};
+  if (card.kind === "run" && !card.live) {
+    if (card.runState === "ended" || card.endedAt) return { key: "ended", text: "ended" };
+    return { key: "lost", text: "lost" };
+  }
+  const runState = card.runState;
+  if (runState === "tool" && card.currentTool) {
+    return { key: "tool", text: card.currentTool.name || "tool" };
+  }
+  if (runState === "thinking") return { key: "thinking", text: "thinking" };
+  if (runState === "error") return { key: "error", text: "error" };
+  if (runState === "idle" && card.live) return { key: "idle", text: "waiting for you" };
+  switch (s.state) {
+    case "tool": return { key: "tool", text: (s.tools && s.tools[0] ? s.tools[0].name : "tool") };
+    case "thinking": return { key: "thinking", text: "thinking" };
+    case "error": return { key: "error", text: "error" };
+    case "empty": return { key: "idle", text: "empty" };
+    case "unreadable": return { key: "error", text: "unreadable" };
+    default: return { key: "idle", text: card.live ? "waiting for you" : "idle" };
+  }
+}
+
+function activityText(card) {
+  const s = card.session || {};
+  if (card.currentTool) {
+    return `${card.currentTool.name}: ${card.currentTool.summary || ""}`.trim();
+  }
+  if (s.state === "tool" && s.tools?.length) {
+    return s.tools.map((t) => `${t.name}: ${t.summary || ""}`.trim()).join("  •  ");
+  }
+  if (s.state === "error" && s.detail) return "error: " + s.detail;
+  return null;
+}
+
+function cardTitle(card) {
+  const s = card.session || {};
+  return card.label || s.name || card.runId || (s.cwd ? s.cwd.split("/").pop() : "session");
+}
+
+let now = Date.now();
+let serverSkew = 0;
+
+function renderList(state) {
+  const list = document.getElementById("list");
+  list.replaceChildren();
+  document.getElementById("summary").textContent =
+    `${state.liveCount} live · ${state.cards.length} session${state.cards.length === 1 ? "" : "s"}`;
+
+  if (!state.cards.length) {
+    list.append(el("div", "empty", "No sessions yet. Start one with ./pi and it shows up here."));
+    return;
+  }
+
+  for (const card of state.cards) {
+    const s = card.session || {};
+    const st = stateOf(card);
+    const node = el("div", "card" + (card.live ? " live" : ""));
+
+    const top = el("div", "card-top");
+    top.append(el("span", "name", cardTitle(card)));
+    top.append(el("span", "spacer"));
+    top.append(el("span", "badge " + st.key, st.text));
+    node.append(top);
+
+    node.append(el("div", "path", (card.agent === "omp" ? "omp · " : "") + (card.cwd || s.file || "")));
+
+    const activity = activityText(card);
+    if (activity) node.append(el("div", "activity", activity));
+
+    const stats = el("div", "stats");
+    const add = (label, value) => {
+      const wrap = el("span");
+      wrap.append(document.createTextNode(label + " "));
+      wrap.append(el("b", null, value));
+      stats.append(wrap);
+    };
+    add("last", ago(now - (s.lastActivity ?? 0)));
+    add("msgs", num(s.messages));
+    if (card.contextPercent != null) add("ctx", Math.round(card.contextPercent) + "%");
+    else if (s.tokens != null) add("tokens", num(s.tokens));
+    add("cost", money(card.runCost ?? s.cost));
+    if (s.model) add("model", s.model);
+    node.append(stats);
+
+    if (card.contextPercent != null) {
+      const bar = el("div", "bar");
+      const fill = el("i");
+      fill.style.width = Math.min(100, Math.max(0, card.contextPercent)) + "%";
+      bar.append(fill);
+      node.append(bar);
+    }
+
+    for (const w of card.warnings || []) node.append(el("div", "warn", "⚠ " + w));
+
+    if (s.file) node.addEventListener("click", () => open(s.file));
+    node.style.cursor = s.file ? "pointer" : "default";
+    list.append(node);
+  }
+}
+
+// ------------------------------------------------------------------ detail
+
+let openFile = null;
+let openVersion = null;
+
+function open(file) {
+  openFile = file;
+  openVersion = null;
+  location.hash = "file=" + encodeURIComponent(file);
+  document.getElementById("list").hidden = true;
+  document.getElementById("detail").hidden = false;
+  document.getElementById("back").hidden = false;
+  refreshDetail();
+}
+
+function closeDetail() {
+  openFile = null;
+  history.replaceState(null, "", location.pathname + location.search);
+  document.getElementById("list").hidden = false;
+  document.getElementById("detail").hidden = true;
+  document.getElementById("back").hidden = true;
+}
+
+function renderDetail(payload) {
+  const root = document.getElementById("detail");
+  root.replaceChildren();
+  const s = payload.session;
+
+  const head = el("div");
+  head.append(el("h1", null, s.name || s.cwd || s.file));
+  const meta = el("div", "meta");
+  const bit = (label, value) => meta.append(el("span", null, label + ": " + value));
+  bit("state", s.state);
+  bit("model", (s.provider ? s.provider + "/" : "") + (s.model || "—"));
+  bit("messages", num(s.messages));
+  if (s.tokens != null) bit("context tokens", num(s.tokens));
+  bit("cost", money(s.cost));
+  bit("session", s.sessionId || "—");
+  head.append(meta);
+
+  const exportBtn = el("button", null, "open full transcript ↗");
+  exportBtn.addEventListener("click", () => {
+    const u = new URL("/api/export", location.origin);
+    u.searchParams.set("file", s.file);
+    if (TOKEN) u.searchParams.set("token", TOKEN);
+    window.open(u, "_blank");
+  });
+  head.append(exportBtn);
+  root.append(head);
+
+  if (payload.omitted) {
+    root.append(el("div", "muted small", `${payload.omitted} earlier message(s) not shown.`));
+  }
+
+  for (const m of payload.entries) {
+    const kind = m.isError ? "error" : m.kind;
+    const box = el("div", "msg " + kind);
+    const header = el("div", "head");
+    header.append(el("span", null, m.kind === "toolResult" ? "tool result · " + (m.toolName || "") : m.kind));
+    header.append(el("span", "spacer"));
+    if (m.label) header.append(el("span", null, m.label));
+    if (m.ts) header.append(el("span", null, new Date(m.ts).toLocaleTimeString()));
+    box.append(header);
+
+    if (m.kind === "bash" && m.command) {
+      box.append(el("div", "body mono", "$ " + m.command));
+    }
+    if (m.thinkingChars) {
+      box.append(el("div", "thinking", `thought for ${m.thinkingChars.toLocaleString()} characters`));
+    }
+    if (m.text) {
+      const mono = m.kind === "toolResult" || m.kind === "bash";
+      box.append(el("div", "body" + (mono ? " mono" : ""), m.text));
+    }
+    if (m.toolCalls?.length) {
+      const calls = el("div", "calls");
+      for (const c of m.toolCalls) calls.append(el("div", "call", `${c.name}  ${c.summary || ""}`));
+      box.append(calls);
+    }
+    if (m.kind === "compaction") {
+      box.append(el("div", "thinking", `compacted (${num(m.tokensBefore)} tokens before)`));
+    }
+    root.append(box);
+  }
+}
+
+async function refreshDetail() {
+  if (!openFile) return;
+  try {
+    const payload = await api("/api/session", { file: openFile, v: openVersion, limit: 80 });
+    if (payload.unchanged) return;
+    if (payload.error) return;
+    openVersion = payload.session.version;
+    const atBottom = window.innerHeight + window.scrollY >= document.body.offsetHeight - 120;
+    renderDetail(payload);
+    if (atBottom) window.scrollTo(0, document.body.scrollHeight);
+  } catch {
+    /* transient */
+  }
+}
+
+async function refreshList() {
+  try {
+    const state = await api("/api/state");
+    serverSkew = Date.now() - state.now;
+    now = state.now + serverSkew;
+    if (!openFile) renderList(state);
+    document.getElementById("tick").textContent = "updated " + new Date().toLocaleTimeString();
+  } catch {
+    document.getElementById("tick").textContent = "viewer unreachable";
+  }
+}
+
+document.getElementById("back").addEventListener("click", closeDetail);
+window.addEventListener("hashchange", () => {
+  const m = /file=([^&]+)/.exec(location.hash);
+  if (m) open(decodeURIComponent(m[1]));
+  else closeDetail();
+});
+
+const boot = /file=([^&]+)/.exec(location.hash);
+if (boot) open(decodeURIComponent(boot[1]));
+refreshList();
+setInterval(refreshList, 2000);
+setInterval(refreshDetail, 1500);
+</script>
+</body>
+</html>

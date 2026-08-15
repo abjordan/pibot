@@ -13,7 +13,13 @@ pi-sandbox/
 ├── pi                       ← launcher (chmod +x)
 ├── omp                      ← same sandbox, launches oh-my-pi (chmod +x)
 ├── pi-allow                 ← allowlist helper (chmod +x)
+├── pi-status                ← start/stop the web status view (chmod +x)
 ├── skills/                  ← default custom-skills dir (or set PI_SKILLS_DIR)
+├── status/
+│   ├── Dockerfile           ← viewer image (a different file!)
+│   ├── server.mjs           ← read-only session/run reader + HTTP API
+│   ├── app.html             ← the page itself
+│   └── extension/index.ts   ← pi extension that publishes live run state
 ├── proxy/
 │   ├── Dockerfile           ← squid image (a different file!)
 │   ├── entrypoint.sh        ← parses PI_BASE_URL into ACLs (a different file!)
@@ -49,11 +55,15 @@ The agent talks to the proxy because pi installs undici's `EnvHttpProxyAgent` gl
 ## Setup
 
 ```bash
-chmod +x pi omp pi-allow
+chmod +x pi omp pi-allow pi-status
 cp .env.example .env
 $EDITOR .env          # set PI_BASE_URL, PI_API_KEY, PI_MODEL_ID
 docker compose build
 ```
+
+The status viewer is a separate image behind a compose profile, so a plain
+`docker compose build` skips it. Build it when you first want it, with
+`./pi-status --build`.
 
 Then, from any project directory:
 
@@ -179,6 +189,91 @@ The baseline covers npm, PyPI, GitHub, and Debian. When the agent gets blocked, 
 
 `proxy/allowlist.txt` is the reviewable baseline; `proxy/allowlist.local.txt` is yours. A leading dot matches subdomains (`.npmjs.org` covers `registry.npmjs.org`); no dot is an exact match.
 
+## Checking in on a running agent
+
+Long autonomous runs are hard to supervise from a terminal you have to keep
+attached. `./pi-status` starts a small web view of what every agent container is
+doing — no SSH, no `docker attach`, no second TUI.
+
+```bash
+./pi-status              # start it (idempotent), prints the URL
+./pi-status --logs       # follow the viewer's own log
+./pi-status --stop
+```
+
+Then open <http://localhost:8787>. The page lists every session it can see,
+live ones first: what the agent is doing right now (`bash: npm test -q`, and for
+how long), whether it is thinking or waiting on you, context usage, cost,
+message count, and the transcript itself. "Open full transcript" hands the
+session to `pi --export`, which renders pi's own standalone HTML.
+
+**It is read-only, and structurally so.** The viewer is a separate container on
+its own bridge network. It is not on `pi-egress`, so it cannot reach an agent
+and no agent can reach it; it holds no credentials and never sees your API key;
+and it mounts the two config volumes `:ro`. Everything it knows arrives one way,
+through files the agent already writes:
+
+```
+┌──────────┐  appends JSONL  ╔═══════════╗   reads :ro   ┌──────────┐
+│  agent   │────────────────▶║ pi-config ║──────────────▶│  status  │──▶ 127.0.0.1:8787
+│ pi / omp │                 ║  volume   ║               │  viewer  │
+└──────────┘                 ╚═══════════╝               └──────────┘
+ pi-egress (internal)                                pi-status, no agent route
+```
+
+There is deliberately no way to send a prompt, steer, or open a shell from the
+page. That would need an inbound channel into the sandbox, which is the one
+thing this whole repo exists to prevent.
+
+Two sources feed it. The session JSONL that pi writes anyway gives the
+transcript and, from the shape of its tail, a good read on state — an assistant
+message with an unanswered tool call means that tool is running right now. The
+status extension (`status/extension/index.ts`, mounted read-only and registered
+in `settings.json` on start) fills in what the file cannot show: a 5-second
+heartbeat, the live tool with its elapsed time, context percentage, and a clean
+"ended" marker on exit. Without the heartbeat there is no way to tell an agent
+thinking hard from a container that died — mtime looks identical.
+
+### Running several agents at once
+
+Concurrent runs work as they always have — each `./pi` is its own container —
+and one viewer covers all of them, so more agents need no more ports.
+
+Two things make that reliable, both on by default:
+
+- **Every run gets its own pi session id.** The `./pi` wrapper mints one
+  (`myproject-20260815-142233-a3f1`) and the entrypoint passes it as
+  `--session-id`. Sessions are stored as `<timestamp>_<sessionId>.jsonl`, so the
+  transcript is self-identifying and the viewer never has to guess which
+  container produced it. Label a run for the page with
+  `PIBOT_LABEL="nightly refactor" ./pi`.
+- **Config writes are serialized.** Every container read-modify-writes
+  `models.json` and `settings.json` in the shared config volume at startup. The
+  writes are atomic, so nothing corrupts, but without a lock the last writer
+  wins and another container's merge — a seeded extension registration, say —
+  disappears silently. The entrypoint now takes an `flock` around both.
+
+One footgun remains, and the wrapper warns rather than prevents: **`./pi -c` in
+a directory another agent is already working in.** pi appends session entries
+with a plain `appendFileSync` and `-c` resolves to "most recent session for this
+cwd" with no ownership check, so two containers can end up interleaving two
+conversations into one tree. Starting fresh runs is always safe; it is only
+`-c` that reuses a file. The status page flags it too, on both cards.
+
+### Reaching it from somewhere else
+
+The port publishes on `127.0.0.1` only. To check in from a laptop, forward it
+rather than widening the bind:
+
+```bash
+ssh -L 8787:127.0.0.1:8787 dockerhost
+```
+
+If you do widen `PIBOT_STATUS_BIND`, set `PIBOT_STATUS_TOKEN` as well — the
+viewer then requires it as `?token=…` (or an `x-pibot-token` header), and
+`./pi-status` prints the URL with the token already in it. There is no TLS here;
+over anything but loopback or a VPN, put it behind something that has some.
+
 ## What this protects you from, and what it doesn't
 
 **Does:** an agent that `rm -rf`s outside the project, writes to `~/.ssh`, reads your host credentials, curls a pastebin, pip-installs from a typosquatted index you never approved, or wanders onto your LAN. It runs unprivileged, with all capabilities dropped, `no-new-privileges`, and a pid cap.
@@ -190,6 +285,7 @@ The baseline covers npm, PyPI, GitHub, and Debian. When the agent gets blocked, 
 - **No TLS interception**, by design. That means no cert-pinning headaches, but also that the proxy sees only the hostname of an HTTPS request, not the path.
 - **Plain HTTP to your inference box puts the token on the wire in the clear.** Fine on a trusted LAN; worth knowing.
 - **git over SSH won't work.** No proxy for it. Use HTTPS remotes, or add an entry and a token.
+- **The status view publishes a port on your host.** It is read-only, loopback-only, and on a network the agent cannot reach — but it does render agent-authored text (prompts, file contents, command output) in your browser. Content is inserted as text nodes, never as HTML, so a transcript cannot script the page; still, it is a surface that did not exist before. `PIBOT_STATUS=0` removes it entirely.
 
 ## Adding skills
 
@@ -341,6 +437,25 @@ Three ways this goes wrong:
 **`WARNING: HTTP requires the use of Via` in the proxy log.** Expected. It's Squid objecting to `via off`, which is there so the proxy doesn't announce itself upstream. Harmless.
 
 **`network pi-sandbox_pi-egress ... needs to be recreated`** — the egress subnet is pinned in newer builds. `docker compose down` (removes the old network; volumes survive), then start again.
+
+**The status page lists nothing.** The viewer only sees sessions through the config volumes, so check it has them and that something has actually been written:
+
+```bash
+docker compose --profile status exec status ls /data/pi/agent/sessions
+docker compose --profile status logs status | head
+```
+
+It warns at startup if no session root exists, which means the volumes aren't mounted. An empty `sessions` directory means no session has been saved yet — `--no-session` runs are invisible here by design, and so are sessions older than `PIBOT_STATUS_MAX_AGE_DAYS`.
+
+**A run shows as `lost`.** The heartbeat file stopped being touched more than 20 seconds ago and no clean exit was recorded — normally a `docker kill`, an OOM kill, or a host reboot. A clean quit (Ctrl+C, Ctrl+D, `docker stop`) shows `ended` instead, because pi's `session_shutdown` fires on SIGTERM and SIGHUP and the extension writes a terminal record. Stale records are pruned after 7 days.
+
+**A run shows live but the activity never changes.** That is the heartbeat working and the extension not. The heartbeat comes from the entrypoint, the live tool and context numbers from the extension — so this combination means the extension isn't loaded. `./omp` runs always look like this (oh-my-pi uses a different extension schema, same gap as skills), and it also happens if `PIBOT_STATUS=0` was set on a previous run and left a stale `settings.json`:
+
+```bash
+docker compose run --rm --entrypoint sh agent -c 'cat ~/.pi/agent/settings.json'
+```
+
+The `extensions` array should contain `/opt/pibot-status/index.ts`. The transcript, state badge, and cost still work without it — they come from the session file.
 
 ## Notes
 
