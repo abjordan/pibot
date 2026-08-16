@@ -533,19 +533,62 @@ function listRuns() {
     return runs;
 }
 
+/** `.../agent/sessions/--proj--/ts_id.jsonl` -> `sessions/--proj--/ts_id.jsonl`. */
+function relKey(path) {
+    const parts = String(path).split("/").filter(Boolean);
+    return parts.length >= 3 ? parts.slice(-3).join("/") : null;
+}
+
 /**
- * Exact run -> session file resolution.
- *
- * The status extension reports the session file directly. Failing that, a run
- * whose session id we injected owns the file named after it, since sessions are
- * stored as <timestamp>_<sessionId>.jsonl.
+ * Index of the session files we can actually see, keyed the two ways a run
+ * record can point at one.
  */
-function resolveRunSessionExact(run, files) {
-    if (run.sessionFile) return run.sessionFile;
-    if (!run.sessionIdInjected || !run.runId) return null;
-    const suffix = `_${run.runId}.jsonl`;
-    const match = files.find((f) => f.file.endsWith(suffix));
-    return match ? match.file : null;
+function indexFiles(files) {
+    const byRel = new Map();
+    const byBase = new Map();
+    for (const f of files) {
+        const rel = relKey(f.file);
+        if (rel && !byRel.has(rel)) byRel.set(rel, f.file);
+        const base = f.file.split("/").pop();
+        if (base && !byBase.has(base)) byBase.set(base, f.file);
+    }
+    return { byRel, byBase };
+}
+
+/**
+ * Exact run -> session file resolution, in *this* process's namespace.
+ *
+ * The critical part is that a run record is written inside the agent container,
+ * where the config volume is mounted at ~/.pi -- while here the same volume is
+ * at /data/pi. An absolute sessionFile from a record therefore names a path
+ * that does not exist for us, and handing it back produced cards with a stat
+ * that always failed: zero messages, epoch-zero timestamps, and the real
+ * transcript left over as a duplicate card. So every candidate is resolved
+ * against files we have actually seen, and anything unresolvable returns null
+ * to let the cwd heuristic have a go.
+ */
+function resolveRunSessionExact(run, index, files) {
+    // Namespace-independent, written by current versions of the extension.
+    if (run.sessionRelPath && index.byRel.has(run.sessionRelPath)) {
+        return index.byRel.get(run.sessionRelPath);
+    }
+    // Older records (and any custom --session-dir) only carry an absolute path.
+    // Its tail still identifies the file wherever the volume happens to be
+    // mounted, so match on that rather than on the leading directories.
+    if (run.sessionFile) {
+        const rel = relKey(run.sessionFile);
+        if (rel && index.byRel.has(rel)) return index.byRel.get(rel);
+        const base = run.sessionFile.split("/").pop();
+        if (base && index.byBase.has(base)) return index.byBase.get(base);
+    }
+    // A run whose session id we injected owns the file named after it, since
+    // sessions are stored as <timestamp>_<sessionId>.jsonl.
+    if (run.sessionIdInjected && run.runId) {
+        const suffix = `_${run.runId}.jsonl`;
+        const match = files.find((f) => f.file.endsWith(suffix));
+        if (match) return match.file;
+    }
+    return null;
 }
 
 /**
@@ -573,10 +616,11 @@ function buildState() {
     const files = listSessionFiles();
     const runs = listRuns();
 
+    const index = indexFiles(files);
     const wanted = new Set();
     const runFiles = new Map(); // runId -> session file
     for (const run of runs) {
-        const file = resolveRunSessionExact(run, files);
+        const file = resolveRunSessionExact(run, index, files);
         if (file) {
             runFiles.set(run.runId, file);
             wanted.add(file);
@@ -587,10 +631,20 @@ function buildState() {
     const byFile = new Map();
     for (const file of wanted) {
         try {
-            byFile.set(file, viewFor(file).summary());
+            const view = viewFor(file);
+            // A file that vanished between the scan and now. Better to show a
+            // run with no transcript than one with a transcript full of zeros.
+            if (view.missing) continue;
+            byFile.set(file, view.summary());
         } catch (err) {
             byFile.set(file, { file, state: "unreadable", detail: String(err?.message || err) });
         }
+    }
+
+    // Drop matches whose file turned out to be unreadable, so those runs fall
+    // through to the heuristic below rather than keeping a dead reference.
+    for (const [runId, file] of runFiles) {
+        if (!byFile.has(file)) runFiles.delete(runId);
     }
 
     // Second pass, now that headers are parsed: anything still unmatched gets
