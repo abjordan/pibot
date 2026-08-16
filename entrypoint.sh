@@ -361,18 +361,19 @@ if [ "${PIBOT_STATUS:-1}" != "0" ] && mkdir -p "${PIBOT_RUN_DIR}" 2>/dev/null; t
         done
     fi
 
-    # Every key is quoted. `label` is a reserved word in jq (as in
-    # `label $out | ... break $out`), and jq 1.6 -- the version Debian bookworm
-    # ships, and therefore the one in this image -- rejects it as a bare object
-    # key. jq 1.7 accepts keywords as keys, so an unquoted `label:` here works
-    # on a newer jq and fails only in the container. Quoting all of them keeps
-    # that class of surprise away from the rest.
+    # Note `--arg runLabel`, not `--arg label`. `label` is a reserved word in jq
+    # (`label $out | ... break $out`), and a reserved word cannot be a *variable*
+    # name: jq 1.6 -- the version Debian bookworm ships, so the one in this
+    # image -- fails to parse `$label` with "unexpected label, expecting IDENT".
+    # jq 1.7 parses it happily, which is exactly what makes this worth a comment:
+    # the program is only broken on the jq the container actually has. The bare
+    # `label:` object key is fine on both; the variable is what bites.
     run_record="${PIBOT_RUN_DIR}/${PIBOT_RUN}.json"
     tmp="$(mktemp)"
     if jq -n \
         --arg runId     "${PIBOT_RUN}" \
         --arg agent     "${PI_AGENT}" \
-        --arg label     "${PIBOT_LABEL:-}" \
+        --arg runLabel  "${PIBOT_LABEL:-}" \
         --arg cwd       "${PWD}" \
         --arg model     "${PI_MODEL_ID}" \
         --arg provider  "${AGENT_PROVIDER}" \
@@ -380,7 +381,7 @@ if [ "${PIBOT_STATUS:-1}" != "0" ] && mkdir -p "${PIBOT_RUN_DIR}" 2>/dev/null; t
         --argjson injected "${PIBOT_SESSION_ID_INJECTED}" \
         '{
           "runId": $runId, "source": "entrypoint", "agent": $agent,
-          "label": (if $label == "" then null else $label end),
+          "label": (if $runLabel == "" then null else $runLabel end),
           "cwd": $cwd, "model": $model, "provider": $provider,
           "startedAt": $startedAt, "state": "starting",
           "sessionIdInjected": ($injected == 1)
