@@ -361,9 +361,15 @@ if [ "${PIBOT_STATUS:-1}" != "0" ] && mkdir -p "${PIBOT_RUN_DIR}" 2>/dev/null; t
         done
     fi
 
+    # Every key is quoted. `label` is a reserved word in jq (as in
+    # `label $out | ... break $out`), and jq 1.6 -- the version Debian bookworm
+    # ships, and therefore the one in this image -- rejects it as a bare object
+    # key. jq 1.7 accepts keywords as keys, so an unquoted `label:` here works
+    # on a newer jq and fails only in the container. Quoting all of them keeps
+    # that class of surprise away from the rest.
     run_record="${PIBOT_RUN_DIR}/${PIBOT_RUN}.json"
     tmp="$(mktemp)"
-    jq -n \
+    if jq -n \
         --arg runId     "${PIBOT_RUN}" \
         --arg agent     "${PI_AGENT}" \
         --arg label     "${PIBOT_LABEL:-}" \
@@ -373,12 +379,21 @@ if [ "${PIBOT_STATUS:-1}" != "0" ] && mkdir -p "${PIBOT_RUN_DIR}" 2>/dev/null; t
         --arg startedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         --argjson injected "${PIBOT_SESSION_ID_INJECTED}" \
         '{
-          runId: $runId, source: "entrypoint", agent: $agent,
-          label: (if $label == "" then null else $label end),
-          cwd: $cwd, model: $model, provider: $provider,
-          startedAt: $startedAt, state: "starting",
-          sessionIdInjected: ($injected == 1)
-        }' > "${tmp}" && mv "${tmp}" "${run_record}"
+          "runId": $runId, "source": "entrypoint", "agent": $agent,
+          "label": (if $label == "" then null else $label end),
+          "cwd": $cwd, "model": $model, "provider": $provider,
+          "startedAt": $startedAt, "state": "starting",
+          "sessionIdInjected": ($injected == 1)
+        }' > "${tmp}"
+    then
+        mv "${tmp}" "${run_record}"
+    else
+        # Loud, because the failure mode is otherwise invisible: the heartbeat
+        # below would still tick, and the viewer skips a heartbeat with no
+        # record, so the run would just quietly never appear as live.
+        rm -f "${tmp}"
+        echo "warning: could not write the run record for ${PIBOT_RUN}; this run will not show as live in the status view." >&2
+    fi
 
     # Liveness. The extension cannot provide this on its own -- a killed
     # container never gets to write "ended", and for omp there is no extension
