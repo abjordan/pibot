@@ -48,7 +48,18 @@ PI_API="${PI_API:-openai-completions}"
 # paid API, set e.g.
 #   PI_COST_JSON='{"input":3,"output":15,"cacheRead":0.3,"cacheWrite":3.75}'
 # (dollars per million tokens, matching pi's convention).
-PI_COST_JSON="${PI_COST_JSON:-{\"input\":0,\"output\":0,\"cacheRead\":0,\"cacheWrite\":0}}"
+#
+# Set in two steps rather than as ${PI_COST_JSON:-{...}}: bash ends a
+# ${var:-default} at the first unescaped `}`, which in that one-liner is the
+# brace closing the JSON, leaving the final `}` as a literal character after the
+# expansion. Unset, that stray brace happened to re-close the truncated default
+# and the value came out right -- so the bug stayed invisible. Set, it was
+# appended to *your* value, jq refused the result ("invalid JSON text passed to
+# --argjson"), and `set -e` took the whole startup down with it.
+PI_COST_JSON="${PI_COST_JSON:-}"
+if [ -z "${PI_COST_JSON}" ]; then
+    PI_COST_JSON='{"input":0,"output":0,"cacheRead":0,"cacheWrite":0}'
+fi
 
 # Which agent to launch. `pi` is the default (vanilla pi coding agent); `omp`
 # runs the oh-my-pi fork (binary `omp`). They differ only in a few particulars,
