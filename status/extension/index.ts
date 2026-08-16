@@ -137,7 +137,14 @@ export default function (pi: any) {
         try {
             const sm = ctx?.sessionManager;
             if (sm) {
-                record.sessionFile = sm.getSessionFile?.() ?? null;
+                const file = sm.getSessionFile?.() ?? null;
+                record.sessionFile = file;
+                // The viewer runs in a different container, where this same
+                // volume is mounted somewhere else entirely -- so an absolute
+                // path from here means nothing there. The trailing
+                // `sessions/<project>/<file>.jsonl` is the part that identifies
+                // the file in any namespace, so publish that too.
+                record.sessionRelPath = file ? file.split("/").filter(Boolean).slice(-3).join("/") : null;
                 record.sessionId = sm.getSessionId?.() ?? null;
                 record.sessionName = sm.getSessionName?.() ?? null;
                 record.cwd = sm.getCwd?.() ?? ctx.cwd ?? null;
